@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asistente de voz</title>
+<style>
+  :root { --bg:#f3f6f8; --surface:#fff; --line:#d5dee5; --fg:#14232e; --muted:#5b6e7c; --accent:#0b6e7f; --accent-fg:#fff; --warn:#a4380f; color-scheme: light; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e171d; --surface:#16232b; --line:#273944; --fg:#e6eef3; --muted:#93a8b6; --accent:#4fc0d2; --accent-fg:#07222a; --warn:#ff9a73; color-scheme: dark; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    padding: max(12px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  .app { height: 100%; max-width: 640px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  #log { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+  .msg { max-width: 88%; padding: 10px 14px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .yo { align-self: flex-end; background: var(--accent); color: var(--accent-fg); }
+  .ia { align-self: flex-start; background: var(--surface); border: 1px solid var(--line); }
+  #estado { min-height: 1.3em; font-size: .9rem; color: var(--muted); }
+  #estado.error { color: var(--warn); }
+  #hablar { font: inherit; font-weight: 600; font-size: 1.1rem; min-height: 64px; border-radius: 16px; border: 0; background: var(--accent); color: var(--accent-fg); cursor: pointer; }
+  #hablar.on { background: var(--warn); color: #fff; }
+  form { display: flex; gap: 8px; }
+  #txt { flex: 1; min-width: 0; font: inherit; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); }
+  form button { font: inherit; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--fg); padding: 0 16px; min-height: 48px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <h1>Asistente de voz</h1>
+  <div id="log" role="log" aria-live="polite">
+    <div class="msg ia">Hola Ayrton. Toca "Hablar", cuéntame tus pendientes y te ayudo a ordenarlos.</div>
+  </div>
+  <div id="estado"></div>
+  <button id="hablar" type="button">🎤 Hablar</button>
+  <form id="form" autocomplete="off">
+    <input id="txt" type="text" placeholder="O escribe aquí" aria-label="Tu mensaje">
+    <button type="submit">Enviar</button>
+  </form>
+</div>
+
+<script>
+(function () {
+  var log = document.getElementById("log");
+  var estado = document.getElementById("estado");
+  var btn = document.getElementById("hablar");
+  var form = document.getElementById("form");
+  var txt = document.getElementById("txt");
+  var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  var historial = [];
+  var ocupado = false;
+  var rec = null;
+  var modoVoz = false;
+
+  function setEstado(t, err) { estado.textContent = t || ""; estado.className = err ? "error" : ""; }
+  function burbuja(clase, texto) {
+    var d = document.createElement("div");
+    d.className = "msg " + clase; d.textContent = texto;
+    log.appendChild(d); log.scrollTop = log.scrollHeight;
+  }
+
+  function hablar(texto) {
+    return new Promise(function (resolve) {
+      try {
+        speechSynthesis.cancel();
+        var u = new SpeechSynthesisUtterance(texto);
+        var voces = speechSynthesis.getVoices();
+        var v = voces.find(function (x) { return /^es-(419|MX|US|PE|CO|AR)/i.test(x.lang); }) ||
+                voces.find(function (x) { return /^es/i.test(x.lang); });
+        if (v) { u.voice = v; u.lang = v.lang; } else { u.lang = "es-419"; }
+        u.onend = u.onerror = function () { resolve(); };
+        speechSynthesis.speak(u);
+      } catch (e) { resolve(); }
+    });
+  }
+
+  async function enviar(texto) {
+    texto = (texto || "").trim();
+    if (!texto || ocupado) return;
+    ocupado = true;
+    burbuja("yo", texto);
+    historial.push({ role: "user", content: texto });
+    setEstado("Pensando...");
+    try {
+      var r = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: historial }),
+      });
+      var j = await r.json();
+      if (!r.ok) throw new Error(j.error || "Error");
+      historial.push({ role: "assistant", content: j.reply });
+      burbuja("ia", j.reply);
+      setEstado("Hablando...");
+      await hablar(j.reply);
+      setEstado("");
+    } catch (e) {
+      setEstado("Error: " + e.message, true);
+      ocupado = false;
+      return;
+    }
+    ocupado = false;
+    if (modoVoz) escuchar();
+  }
+
+  function escuchar() {
+    if (!SR) { setEstado("Este navegador no permite dictado. Usa Safari o Chrome, o escribe.", true); return; }
+    try {
+      rec = new SR();
+      rec.lang = "es-PE";
+      rec.interimResults = false;
+      rec.onresult = function (e) { rec = null; enviar(e.results[0][0].transcript); };
+      rec.onerror = function () {
+        rec = null; modoVoz = false; pintarBtn();
+        setEstado("No pude escuchar. Revisa el permiso del micrófono y toca Hablar de nuevo.", true);
+      };
+      rec.onend = function () { if (rec) { rec = null; if (modoVoz && !ocupado) escuchar(); } };
+      rec.start();
+      setEstado("Te escucho...");
+    } catch (e) {
+      rec = null; modoVoz = false; pintarBtn();
+      setEstado("Toca Hablar para continuar.", true);
+    }
+  }
+
+  function pintarBtn() {
+    btn.textContent = modoVoz ? "⏹ Detener" : "🎤 Hablar";
+    btn.className = modoVoz ? "on" : "";
+  }
+
+  btn.addEventListener("click", function () {
+    if (modoVoz) {
+      modoVoz = false; pintarBtn();
+      if (rec) { var r = rec; rec = null; try { r.abort(); } catch (e) {} }
+      try { speechSynthesis.cancel(); } catch (e) {}
+      setEstado("");
+      return;
+    }
+    try { speechSynthesis.speak(new SpeechSynthesisUtterance("")); } catch (e) {}
+    modoVoz = true; pintarBtn();
+    escuchar();
+  });
+
+  form.addEventListener("submit", function (ev) {
+    ev.preventDefault();
+    try { speechSynthesis.speak(new SpeechSynthesisUtterance("")); } catch (e) {}
+    var t = txt.value; txt.value = "";
+    enviar(t);
+  });
+})();
+</script>
+</body>
+</html>
