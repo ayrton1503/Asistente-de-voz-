@@ -31,7 +31,7 @@ module.exports = async (req, res) => {
       role: m.role === "assistant" ? "model" : "user",
       parts: [{ text: m.content }],
     }));
-    const model = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    const model = "gemini-3.8-flash";
     const r = await fetch(
       "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
       {
@@ -40,10 +40,7 @@ module.exports = async (req, res) => {
         body: JSON.stringify({
           system_instruction: { parts: [{ text: SYSTEM }] },
           contents,
-          generationConfig: {
-            maxOutputTokens: 800,
-            thinkingConfig: { thinkingBudget: 0 },
-          },
+          generationConfig: { maxOutputTokens: 2000 },
         }),
       }
     );
